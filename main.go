@@ -1,7 +1,7 @@
 package main
 
 //---------------------------------------------------------------------------------------------------------
-//	Imprtations
+//	Importations
 //---------------------------------------------------------------------------------------------------------
 import (
 	"database/sql"
@@ -18,14 +18,16 @@ import (
 )
 
 //---------------------------------------------------------------------------------------------------------
-// Vairables an structures
+// Vairables and structures
 //---------------------------------------------------------------------------------------------------------
 
+// Global variable of database in Cockroach
 var globalDB *sql.DB
 
 // DataDomain is...
 type DataDomain struct {
 	Servers          []DataServer
+	domain           string
 	ServersChange    bool
 	SSLGrade         string
 	PreviousSSLGrade string
@@ -42,157 +44,128 @@ type DataServer struct {
 	Owner    string
 }
 
-//---------------------------------------------------------------------------------------------------------
-//---------------------------------------------------------------------------------------------------------
-//---------------------------------------------------------------------------------------------------------
-
-// Index is ...
-func Index(ctx *fasthttp.RequestCtx) {
-	fmt.Fprint(ctx, "Welcome!\n")
+// StructSend is...
+type StructSend struct {
+	ID               string
+	Domain           string
+	PreviousSslGrade string
+	CheckedAt        string
 }
 
-// Hello ...
-func Hello(ctx *fasthttp.RequestCtx) {
-	fmt.Fprintf(ctx, "hello, %s!\n", ctx.UserValue("name"))
-}
+//---------------------------------------------------------------------------------------------------------
+//----------------------------------- FUNCTIONS -----------------------------------------------------------
+//---------------------------------------------------------------------------------------------------------
 
-// Post ...
-func Post(ctx *fasthttp.RequestCtx) {
-
-	var domain interface{} = ctx.UserValue("domain")
-	err := registerDomain(globalDB, domain.(string))
-
-	ctx.Response.Header.SetCanonical([]byte("Content-Type"), []byte("application/json"))
-
-	if err != nil {
-		ctx.Response.SetStatusCode(500)
-		fmt.Println(err)
-		json.NewEncoder(ctx).Encode("Error interno del servidor")
-	} else {
-		ctx.Response.SetStatusCode(201)
-		json.NewEncoder(ctx).Encode("Se ha registrado con éxito")
-	}
-
-}
-
-// GetDomains ...
+// GetDomains is a function that return all registries of domains checked in the app. This return a list using
+// the StructSend structure.
 func GetDomains(ctx *fasthttp.RequestCtx) {
 
-	data, err := ConsultDomains(globalDB)
-
+	ctx.Response.Header.Set("Access-Control-Allow-Origin", "*")
 	ctx.Response.Header.SetCanonical([]byte("Content-Type"), []byte("application/json"))
+
+	register, err := ConsultDomains(globalDB)
 
 	if err != nil {
 		ctx.Response.SetStatusCode(500)
 		fmt.Println(err)
 		json.NewEncoder(ctx).Encode("Error interno del servidor")
 	} else {
-
 		ctx.Response.SetStatusCode(200)
-		json.NewEncoder(ctx).Encode(data)
+		json.NewEncoder(ctx).Encode(register)
 	}
 }
 
-// save and run project atthe same time: CompileDaemon -command="internship-challenge-t.exe"
-//---------------------------------------------------------------------------------------------------------
-// Main method that execute whole program
-//---------------------------------------------------------------------------------------------------------
-func main() {
-
-	db, err := Conn()
-
-	if err != nil {
-		log.Fatal("error connecting to the database: ", err)
-	} else {
-		globalDB = db
-		router := fasthttprouter.New()
-		router.GET("/", Index)
-		router.GET("/hello/:name", Hello)
-		router.POST("/post/:domain", Post)
-		router.GET("/consult", GetDomains)
-
-		router.POST("/checkDomain/:domain", CheckDomain)
-
-		log.Fatal(fasthttp.ListenAndServe(":8082", router.Handler))
-
-	}
-}
-
-// CheckDomain ...
-//---------------------------------------------------------------------------------------------------------
-//
-//---------------------------------------------------------------------------------------------------------
+// CheckDomain is a function that check a domain using Whois and ssl APIS.
 func CheckDomain(ctx *fasthttp.RequestCtx) {
 
+	ctx.Response.Header.Set("Access-Control-Allow-Origin", "*")
 	ctx.Response.Header.SetCanonical([]byte("Content-Type"), []byte("application/json"))
-	var do interface{} = ctx.UserValue("domain")
-	domain := do.(string)
 
-	// get SSL and WHOIS information
-	data := ObtainDataDomain(domain)
-	if data == nil {
-		ctx.Response.SetStatusCode(404)
-		json.NewEncoder(ctx).Encode("The domain " + domain + " is not found")
-	}
+	//type assertions
+	// var do interface{} = ctx.UserValue("domain")
+	// domain := do.(string)
+	domain := ctx.UserValue("domain").(string)
 
-	//Store domain in database
-	err := SaveDomain(domain)
+	res, err := http.Get("https://api.ssllabs.com/api/v3/analyze?host=" + domain)
 
 	if err != nil {
+
+		log.Fatalln(err)
 		ctx.Response.SetStatusCode(500)
-		fmt.Println(err)
-		json.NewEncoder(ctx).Encode("Error interno del servidor")
+		json.NewEncoder(ctx).Encode("Error when consulting 'https://api.ssllabs.com/api/v3/analyze?host'. Try again later")
+
 	} else {
 
-		ctx.Response.SetStatusCode(200)
-		json.NewEncoder(ctx).Encode(data)
+		defer res.Body.Close()
+
+		// This return a list of bytes
+		body, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			log.Fatalln(err)
+		}
+
+		var data map[string]interface{}
+		error := json.Unmarshal(body, &data)
+		if error != nil {
+			panic(error)
+		}
+
+		status := data["status"]
+		if status == "READY" {
+
+			// get SSL and WHOIS information
+			data := ObtainDataDomain(data)
+
+			//get title of page
+			data.Title = GetTitlePage(domain)
+			data.Logo = logo
+			data.domain = domain
+
+			//Store domain in database
+			error := RegisterDom(globalDB, data)
+
+			if error != nil {
+				ctx.Response.SetStatusCode(500)
+				fmt.Println(error)
+				json.NewEncoder(ctx).Encode("Error interno del servidor")
+			} else {
+
+				ctx.Response.SetStatusCode(200)
+				json.NewEncoder(ctx).Encode(data)
+			}
+
+		} else if status == "ERROR" {
+			fmt.Println(data["statusMessage"])
+			ctx.Response.SetStatusCode(404)
+			json.NewEncoder(ctx).Encode("Domain not found")
+		} else {
+			fmt.Println(data["statusMessage"])
+			ctx.Response.SetStatusCode(500)
+			json.NewEncoder(ctx).Encode("Error.. " + data["statusMessage"].(string))
+		}
+
 	}
 
 }
 
-// ObtainDataDomain ...
-//---------------------------------------------------------------------------------------------------------
-//
-//---------------------------------------------------------------------------------------------------------
-func ObtainDataDomain(domain string) *DataDomain {
+// ObtainDataDomain is a function that return a DataDomain struct that contain the information
+// about the domain, servers, etc
+func ObtainDataDomain(data map[string]interface{}) *DataDomain {
 
 	information := new(DataDomain)
-	res, err := http.Get("https://api.ssllabs.com/api/v3/analyze?host=" + domain)
-	if err != nil {
-		log.Fatalln(err)
-		return nil
-	}
-
-	defer res.Body.Close()
-	body, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		log.Fatalln(err)
-	}
-
-	var data map[string]interface{}
-	error := json.Unmarshal([]byte(string(body)), &data)
-	if error != nil {
-		panic(error)
-	}
-
-	test := data["status"]
-	if test == "READY" {
-		information.IsDown = false
-	} else {
-		information.IsDown = true
-	}
+	information.IsDown = true
+	// These items are in progress
+	information.PreviousSSLGrade = "In progress..."
+	information.ServersChange = false
 
 	messages := data["endpoints"].([]interface{})
 
 	for _, item := range messages {
 		var ds DataServer
 		messages2 := item.(map[string]interface{})
-		//fmt.Println(messages2["ipAddress"])
 		ds.Address = messages2["ipAddress"].(string)
 		ds.SSLGrade = messages2["grade"].(string)
 		result, err := whois.Whois(messages2["ipAddress"].(string))
-
-		fmt.Println(result)
 
 		if err == nil {
 
@@ -205,8 +178,7 @@ func ObtainDataDomain(domain string) *DataDomain {
 				} else {
 					ds.Owner = "Not found"
 				}
-				//fmt.Println(result)
-				//result2 := GetStringInBetween(result, "PostalCode:", "Comment:")
+
 				count := GetStringInBetween(result, "Country:", "RegDate:")
 				if count != "" {
 					ds.Country = count
@@ -220,36 +192,44 @@ func ObtainDataDomain(domain string) *DataDomain {
 			}
 
 		}
-
 		information.AddItem(ds)
 	}
-	information.Title = GetTitlePage(domain)
-	information.Logo = logo
+
+	information.SSLGrade = GradeSmallest(information.Servers)
 	return information
 }
 
-// AddItem ...
+// GradeSmallest is a function that return the smallest grade of SSL certificate
+func GradeSmallest(array []DataServer) string {
+
+	data := array[0].SSLGrade
+	for i := 0; i < len(array); i++ {
+		fmt.Println(int(array[i].SSLGrade[0]))
+		if i+1 != len(array) {
+			if int(array[i+1].SSLGrade[0]) > int(array[i].SSLGrade[0]) {
+				data = array[i+1].SSLGrade
+			} else if int(array[i+1].SSLGrade[0]) == 65 && int(array[i].SSLGrade[0]) == 65 {
+				// A+ or A or A-
+				if len(array[i+1].SSLGrade) > 1 {
+					if int(array[i+1].SSLGrade[1]) == 45 {
+						data = array[i+1].SSLGrade
+					}
+				}
+			}
+		}
+	}
+	return data
+}
+
+// AddItem is a function to add item with information of Server to his domain.
 func (dd *DataDomain) AddItem(item DataServer) []DataServer {
 	dd.Servers = append(dd.Servers, item)
 	return dd.Servers
 }
 
-//https://stackoverflow.com/questions/26916952/go-retrieve-a-string-from-between-two-characters-or-other-strings
-// GetStringInBetween Returns empty string if no start string found
-// func GetStringInBetween(str string, start string, end string) (result string) {
-// 	s := strings.Index(str, start)
-// 	if s == -1 {
-// 		return
-// 	}
-// 	s += len(start)
-// 	e := strings.Index(str, end)
-// 	if e == -1 {
-// 		return
-// 	}
-// 	strTrimSpace := strings.TrimSpace(str[s:e])
-// 	return strTrimSpace
-// }
-
+// GetStringInBetween is a function used when I do a request to Whois and the response is
+// a text without format. I tried to use WhoisParse but it doesn´t function very well. So,
+// the idea is extract the two field: organization and country, located between words.
 func GetStringInBetween(str string, start string, end string) (result string) {
 	s := strings.Index(str, start)
 	if s == -1 {
@@ -265,16 +245,29 @@ func GetStringInBetween(str string, start string, end string) (result string) {
 	return strTrimSpace
 }
 
-// ObtainDataDomain ...
+// Save and run project atthe same time: CompileDaemon -command="internship-challenge-t.exe"
 //---------------------------------------------------------------------------------------------------------
-//
+// Main method that execute whole program.
 //---------------------------------------------------------------------------------------------------------
-func SaveDomain(domain string) error {
+func main() {
 
-	err := registerDomain(globalDB, domain)
+	db, err := Conn()
+
 	if err != nil {
-		return err
-	}
-	return nil
+		log.Fatal("Error connecting to the database: ", err)
+	} else {
+		globalDB = db
+		errorCreate := CreateTable()
+		if errorCreate == nil {
 
+			router := fasthttprouter.New()
+			router.GET("/consultDomains", GetDomains)
+			router.POST("/checkDomain/:domain", CheckDomain)
+
+			log.Fatal(fasthttp.ListenAndServe(":8082", router.Handler))
+
+		} else {
+			log.Fatal("Error to creating table: ", errorCreate)
+		}
+	}
 }

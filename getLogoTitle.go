@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -18,14 +19,14 @@ var logo string
 func GetTitlePage(domain string) string {
 
 	var res string
-	logo = ""
-	GetLogoPage(domain)
+
 	// Make HTTP GET request
 	response, err := http.Get("https://www." + domain)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer response.Body.Close()
+	GetLogoPage(response.Body)
 
 	// Get the response body as a string
 	dataInBytes, err := ioutil.ReadAll(response.Body)
@@ -35,7 +36,7 @@ func GetTitlePage(domain string) string {
 	titleStartIndex := strings.Index(pageContent, "<title>")
 	if titleStartIndex == -1 {
 		fmt.Println("No title element found")
-		os.Exit(0)
+
 		res = "No title element found"
 		return res
 	}
@@ -63,16 +64,10 @@ func GetTitlePage(domain string) string {
 	return strings.TrimSpace(res)
 }
 
-func GetLogoPage(domain string) {
-	// Make HTTP request
-	response, err := http.Get("https://" + domain)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer response.Body.Close()
+func GetLogoPage(body io.ReadCloser) {
 
 	// Create a goquery document from the HTTP response
-	document, err := goquery.NewDocumentFromReader(response.Body)
+	document, err := goquery.NewDocumentFromReader(body)
 	if err != nil {
 		log.Fatal("Error loading HTTP response body. ", err)
 	}
